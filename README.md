@@ -1,89 +1,145 @@
-<!-- 
-  Metadata for SEO Optimization
-  Title: BookMyShow Clone - Advanced Movie Ticket Booking System
-  Description: A high-performance BookMyShow Clone built with Java, Spring Boot, and React. Featuring a premium dark-mode UI, seat selection, and REST API.
-  Keywords: BookMyShow Clone, Movie Booking System, Spring Boot React, Full Stack Java, Movie App
--->
+# BookMyShow Clone — Concurrency-Safe Movie Ticket Booking
 
-# 🎬 BookMyShow Clone - Advanced Movie Ticket Booking System
+Full-stack movie ticket booking system: **Spring Boot 3 / Java 21** backend, **PostgreSQL**, **React 19 + Vite** frontend.
 
-A high-performance **BookMyShow Clone** and **Movie Ticket Booking System**. This project is a comprehensive **Full-Stack Java Project** featuring a **Spring Boot** backend and a **React 19** frontend with **Premium UI/UX**.
+This is a backend-hardened redesign of the original prototype. The headline fix is **race-free seat booking** via a per-show seat inventory table with pessimistic locking, DB uniqueness, and idempotent retries — plus JWT auth, Flyway migrations, pagination, and regression tests.
 
-Designed for scalability and modern aesthetics, this **Movie Booking Application** serves as a perfect example of architecture using **Java 17**, **Spring Data JPA**, and **Glassmorphism Design**.
+## What changed from the prototype
 
----
+| Area | Before | Now |
+|---|---|---|
+| Booking | check-then-act, double-books under load | `show_seats` inventory + `PESSIMISTIC_WRITE` + `UNIQUE(show_id, seat_id)` + `Idempotency-Key` |
+| Auth | plaintext password, `GET /users` leaked hashes | BCrypt-12, JWT (access token), no password in any response |
+| Movies API | duplicate `@GetMapping("/genre/{x}")` — app failed startup | `/genre/{genre}` + `/language/{language}`, paginated |
+| Errors | `500` returned as `400`, stack leaks | RFC 7807 `ProblemDetail` (`409` conflict, `404` not-found, `500` real) |
+| DB | `ddl-auto=update` + `TRUNCATE` seed on boot | Flyway `V1__baseline.sql`, `validate`, indexes (incl. `pg_trgm`), Hikari pool |
+| Lists | unbounded `findAll()` | `Page<T>` everywhere |
+| CORS | `allowedOrigins("*")` | allowlist via `CORS_ALLOWED_ORIGINS` |
+| Docker | ran as root, no healthcheck | non-root `app` user, `HEALTHCHECK /actuator/health` |
 
-## 🔥 Key Features
-
-- **🏠 Modern Home Page:** Discover movies with a sleek hero section and trending grid.
-- **📱 Responsive Design:** Premium dark mode UI that works on all devices.
-- **💺 Interactive Booking:** Visual seat selection with real-time price calculation.
-- **🔍 Smart Search:** Quickly find movies, events, and theaters.
-- **📖 API Docs:** Fully documented backend with Swagger UI.
-
----
-
-## 🛠️ Tech Stack
-
-| Frontend | Backend | Database |
-| :--- | :--- | :--- |
-| React 19 + Vite | Spring Boot 3.x | PostgreSQL |
-| TypeScript | Java 17 | Hibernate / JPA |
-| Framer Motion | Spring Security | Maven |
-| Lucide Icons | Swagger / OpenAPI | |
-
----
-
-## 🚀 Quick Setup
-
-### 1️⃣ Backend (Spring Boot)
-1. Create a database named `BMS` in **PostgreSQL**.
-2. Open `src/main/resources/application.properties` and add your DB credentials.
-3. Run the app:
-   ```bash
-   mvn spring-boot:run
-   ```
-
-### 2️⃣ Frontend (React)
-1. In a new terminal, go to the frontend folder:
-   ```bash
-   cd frontend
-   ```
-2. Install dependencies & run:
-   ```bash
-   npm install
-   npm run dev
-   ```
-3. Visit: [http://localhost:5173](http://localhost:5173)
-
----
-
-## 📁 Project Structure
-
-```text
-BOOKMYSHOW/
-├── frontend/             # React App (Components, Pages, Services)
-├── src/main/java/        # Backend Logic (Entities, Services, Controllers)
-├── src/main/resources/   # Config & SQL Seed Data
-└── UI/                   # Legacy UI Files (Optional)
-```
-
----
-
-## 🧭 How it Works
+## Architecture
 
 ```mermaid
-graph LR
-    A[Browse Movies] --> B[View Details]
-    B --> C[Select Seat]
-    C --> D[Confirm Booking]
+flowchart LR
+    FE[React SPA :5173] --> API[Spring Boot API :8080]
+    API --> PG[(PostgreSQL)]
+    API -->|JWT| AUTH[Security filter chain]
+    subgraph booking [Booking path]
+      API -->|SELECT FOR UPDATE| INV[show_seats]
+      INV --> BK[bookings + booking_seats]
+    end
 ```
 
----
+Key tables: `users`, `movies`, `theaters`, `screens`, `seats`, `shows`, **`show_seats(show_id, seat_id UNIQUE, status)`**, `bookings(idempotency_key UNIQUE)`, `booking_seats`.
 
-## 🔗 Useful Links
+## API (base `/api` — legacy — and `/api/v1`)
 
-- **Swagger API Docs:** [http://localhost:8080/swagger-ui/index.html](http://localhost:8080/swagger-ui/index.html)
-- **Local Website:** [http://localhost:5173](http://localhost:5173)
+| Method | Endpoint | Auth | Notes |
+|---|---|---|---|
+| POST | `/users/register` | no | `201`, BCrypt hash, validates email/password≥8 |
+| POST | `/users/login` | no | returns `{ accessToken, userId, email, role }` |
+| GET | `/users`, `/users/{id}` | — | paginated, **never returns password** |
+| GET | `/movies?page=&size=` | no | paginated |
+| GET | `/movies/{id}`, `/movies/search?title=`, `/movies/genre/{g}`, `/movies/language/{l}` | no | |
+| GET | `/shows`, `/shows/{id}`, `/shows/movie/{id}`, `/shows/movie/{id}/date?date=` | no | |
+| GET | `/theaters`, `/theaters/{id}`, `/theaters/city/{cityId}` | no | |
+| GET | `/cities`, `/cities/{id}` | no | |
+| POST | `/bookings` | **yes** (`Bearer`) | `201`, supports `Idempotency-Key` header or `idempotencyKey` body |
+| GET | `/bookings/{id}`, `/bookings/user/{uid}?page=` | yes | |
+| PUT | `/bookings/{id}/cancel` | yes | releases `show_seats` → `AVAILABLE` |
+| GET | `/bookings/show/{showId}/available-seats` | no | |
 
-Developed with ❤️ by the Project Team.
+Error shape (RFC 7807): `{ type, title, status, detail, timestamp }`. Double-book → `409 Seat with id X is already booked`.
+
+## Booking concurrency design
+
+1. Client sends `POST /bookings { userId, showId, seatIds, idempotencyKey? }` (or `Idempotency-Key` header).
+2. Server: idempotency short-circuit → `SELECT ... FOR UPDATE` on `show_seats` rows → validate `AVAILABLE` + same screen → mark `BOOKED` → insert `bookings` — all in one transaction.
+3. Unique constraints (`show_seats`, `bookings.idempotency_key`) make the DB the final arbiter. Retries with the same key return the original row.
+
+Proven by `BookingConcurrencyTest`: 2 threads × same seat → exactly 1 win + 1 `409`.
+
+## Quick start
+
+### 1. Backend
+
+Requirements: JDK 21, Maven 3.9+, PostgreSQL 15+.
+
+```bash
+createdb BMS
+# env (or edit application.properties defaults)
+export SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/BMS
+export SPRING_DATASOURCE_USERNAME=postgres
+export SPRING_DATASOURCE_PASSWORD=123
+export APP_JWT_SECRET="<at-least-32-bytes-random-string>"
+export CORS_ALLOWED_ORIGINS=http://localhost:5173
+
+mvn spring-boot:run
+# Swagger: http://localhost:8080/swagger-ui/index.html
+# Health:  http://localhost:8080/actuator/health
+```
+
+Flyway migrates automatically (`V1__baseline.sql` with indexes + `pg_trgm`). `ddl-auto=validate` — schema changes go in new `db/migration/Vn__*.sql` files.
+
+### 2. Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+# http://localhost:5173
+```
+
+The SPA still calls `/api/...` — both `/api` and `/api/v1` are served, so no frontend change required. Paginated responses are `Page` objects (`content`, `totalElements`, ...); update grids to read `.content` when you adopt `size` params.
+
+### 3. Docker
+
+```bash
+docker build -t bms .
+docker run -p 8080:8080 \
+  -e SPRING_DATASOURCE_URL=jdbc:postgresql://host.docker.internal:5432/BMS \
+  -e SPRING_DATASOURCE_USERNAME=postgres \
+  -e SPRING_DATASOURCE_PASSWORD=123 \
+  -e APP_JWT_SECRET="<64-char-secret>" bms
+```
+
+## Tests
+
+```bash
+mvn test -Dtest=BookingConcurrencyTest   # concurrency + idempotency (H2, no Postgres needed)
+mvn package -DskipTests                  # build jar -> target/BMS-*.jar
+```
+
+## Configuration reference
+
+| Key | Default | Purpose |
+|---|---|---|
+| `SPRING_DATASOURCE_URL` | `jdbc:postgresql://localhost:5432/BMS` | JDBC URL |
+| `SPRING_DATASOURCE_USERNAME/PASSWORD` | `postgres/123` | DB creds |
+| `DB_POOL_SIZE` | `20` | Hikari max pool |
+| `APP_JWT_SECRET` | dev placeholder | **Must override in prod (≥32 bytes)** |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:5173` | comma-separated allowlist |
+
+## Project structure
+
+```text
+src/main/java/com/cfs/BMS/
+├── config/        # SecurityConfig, CorsConfig, OpenApiConfig
+├── security/      # JwtUtil, JwtAuthFilter (stateless, Bearer)
+├── controller/    # Booking, Movie, Show, Theater, Screen, Seat, City, User
+├── service/       # BookingService (locked), UserService (BCrypt+JWT), ...
+├── repository/    # + ShowSeatRepository (pessimistic locks)
+├── entity/        # Booking(idempotencyKey, version), ShowSeat, User(role)
+├── enums/         # BookingStatus, SeatHoldStatus, SeatType, UserRole
+├── exception/     # ProblemDetail handler + typed exceptions
+└── dto/           # validated requests, AuthResponse
+src/main/resources/db/migration/V1__baseline.sql
+src/test/.../BookingConcurrencyTest.java
+frontend/          # React 19 + Vite + TS
+```
+
+## Production notes / next steps
+
+- Short-lived JWT (15 min) + refresh rotation, RBAC enforcement on admin routes.
+- Redis seat-hold with TTL (10 min) + Kafka outbox → payment saga → notifications.
+- Read replica for catalog, `pg_trgm`/FTS tuning for search, rate limiting (Bucket4j), tracing (Micrometer).

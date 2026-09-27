@@ -7,14 +7,19 @@ import com.cfs.BMS.entity.Seat;
 import com.cfs.BMS.service.BookingService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.web.PageableDefault;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 
 @RestController
-@RequestMapping("/api/bookings")
+@RequestMapping({"/api/bookings", "/api/v1/bookings"})
 @RequiredArgsConstructor
 @Tag(name = "Booking Management", description = "Endpoints for creating and managing movie ticket bookings")
 public class BookingController {
@@ -22,39 +27,38 @@ public class BookingController {
     private final BookingService bookingService;
 
     @PostMapping
-    @Operation(summary = "Create a new booking", description = "Processes a ticket booking request for selected seats and show")
-    public ResponseEntity<Booking> createBooking(@RequestBody BookingRequest request)
-    {
-        return ResponseEntity.ok(bookingService.createBooking(request));
+    @Operation(summary = "Create a new booking (idempotent via Idempotency-Key or body key)")
+    public ResponseEntity<Booking> createBooking(@Valid @RequestBody BookingRequest request,
+                                                @RequestHeader(value = "Idempotency-Key", required = false) String idemHeader) {
+        if (request.getIdempotencyKey() == null && idemHeader != null) {
+            try { request.setIdempotencyKey(java.util.UUID.fromString(idemHeader)); }
+            catch (IllegalArgumentException ignored) { }
+        }
+        return ResponseEntity.status(HttpStatus.CREATED).body(bookingService.createBooking(request));
     }
 
     @GetMapping("/{id}")
-    @Operation(summary = "Get booking by ID", description = "Retrieves details of a specific booking")
-    public ResponseEntity<Booking> getBookingById(@PathVariable Long id)
-    {
+    @Operation(summary = "Get booking by ID")
+    public ResponseEntity<Booking> getBookingById(@PathVariable Long id) {
         return ResponseEntity.ok(bookingService.getBookingById(id));
     }
 
     @GetMapping("/user/{userId}")
-    @Operation(summary = "Get bookings by User ID", description = "Retrieves a list of all bookings made by a specific user")
-    public ResponseEntity<List<Booking>> getBookingByUserId(@PathVariable Long userId)
-    {
-        return ResponseEntity.ok(bookingService.getBookingByUser(userId));
+    @Operation(summary = "Get bookings by User ID (paginated)")
+    public ResponseEntity<Page<Booking>> getBookingByUserId(@PathVariable Long userId,
+                                                           @PageableDefault(size = 20) Pageable pageable) {
+        return ResponseEntity.ok(bookingService.getBookingByUser(userId, pageable));
     }
 
     @PutMapping("/{id}/cancel")
-    @Operation(summary = "Cancel a booking", description = "Cancels an existing booking and releases the reserved seats")
-    public ResponseEntity<Booking> cancelBooking(@PathVariable Long id)
-    {
-        return ResponseEntity.ok(bookingService.cancelbooking(id));
+    @Operation(summary = "Cancel a booking and release seats")
+    public ResponseEntity<Booking> cancelBooking(@PathVariable Long id) {
+        return ResponseEntity.ok(bookingService.cancelBooking(id));
     }
 
     @GetMapping("/show/{showId}/available-seats")
-    @Operation(summary = "Get available seats for a show", description = "Retrieves a list of seats that are not yet booked for a specific show")
-    public ResponseEntity<List<Seat>> getAvailableSeats(@PathVariable Long showId)
-    {
+    @Operation(summary = "Get available seats for a show")
+    public ResponseEntity<List<Seat>> getAvailableSeats(@PathVariable Long showId) {
         return ResponseEntity.ok(bookingService.getAvailableSeats(showId));
     }
-
-
 }

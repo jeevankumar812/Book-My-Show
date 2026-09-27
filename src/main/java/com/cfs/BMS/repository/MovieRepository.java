@@ -1,15 +1,14 @@
 package com.cfs.BMS.repository;
 
 import com.cfs.BMS.entity.Movie;
-import com.cfs.BMS.entity.Screen;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 
-import java.util.List;
+public interface MovieRepository extends JpaRepository<Movie, Long> {
 
-public interface MovieRepository extends JpaRepository<Movie,Long> {
-
-  List<Movie> findByGenre(String genre);
-  List<Movie> findByLanguage(String language);
-  List<Movie> findByTitleContainingIgnoreCase(String title);
+  Page<Movie> findByGenreIgnoreCase(String genre, Pageable pageable);
+  Page<Movie> findByLanguageIgnoreCase(String language, Pageable pageable);
+  Page<Movie> findByTitleContainingIgnoreCase(String title, Pageable pageable);
 
 }

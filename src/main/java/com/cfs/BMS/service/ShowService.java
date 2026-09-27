@@ -5,7 +5,7 @@ import com.cfs.BMS.dto.ShowRequest;
 import com.cfs.BMS.entity.Movie;
 import com.cfs.BMS.entity.Screen;
 import com.cfs.BMS.entity.Show;
-import com.cfs.BMS.entity.Theater;
+import com.cfs.BMS.exception.NotFoundException;
 import com.cfs.BMS.repository.ShowRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -45,7 +45,7 @@ public class ShowService {
     public Show getShowById(Long id)
     {
         return showRepository.findById(id)
-                .orElseThrow(()->new RuntimeException("Show not found with id: "+id));
+                .orElseThrow(()->new NotFoundException("Show not found with id: "+id));
 
     }
 
